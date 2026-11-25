@@ -1,0 +1,90 @@
+name: build intel mac dmg
+on:
+  workflow_dispatch:
+    inputs:
+      app_ref: { description: "herdr-app ref (branch/tag/sha)", default: "master" }
+      core_ref: { description: "herdr-core ref (branch/tag/sha)", default: "master" }
+  push:
+    branches: [main]
+permissions:
+  contents: write
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  ZIG_VERSION: 0.16.0
+  TARGET: x86_64-apple-darwin
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    defaults: { run: { shell: bash } }
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: wrap }
+      - uses: actions/checkout@v4
+        with:
+          repository: herdrdev/herdr-app
+          ref: ${{ inputs.app_ref || 'master' }}
+          path: app
+          submodules: true
+      - uses: actions/checkout@v4
+        with:
+          repository: herdrdev/herdr-core
+          ref: ${{ inputs.core_ref || 'master' }}
+          path: core
+          submodules: true
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ env.TARGET }}
+      - uses: mlugg/setup-zig@v2
+        with: { version: ${{ env.ZIG_VERSION }} }
+      - name: Versions
+        id: v
+        run: |
+          app_v=$(sed -n 's/^version = "\(.*\)"/\1/p' app/Cargo.toml | head -1)
+          core_v=$(sed -n 's/^version = "\(.*\)"/\1/p' core/crates/herdr-core/Cargo.toml | head -1)
+          echo "app=$app_v" >> "$GITHUB_OUTPUT"; echo "core=$core_v" >> "$GITHUB_OUTPUT"
+          echo "app $app_v ($(git -C app rev-parse --short HEAD)), core $core_v ($(git -C core rev-parse --short HEAD))"
+      - name: Build herdr-core (x86_64)
+        working-directory: core
+        run: |
+          cargo build --release --locked --target $TARGET -p herdr-core
+          sh scripts/mac-bundle target/$TARGET/release/herdr-core "target/$TARGET/release/Herdr Core.app"
+          scripts/mac-sign "target/$TARGET/release/Herdr Core.app"
+          scripts/mac-sign "target/$TARGET/release/herdr-core"
+          file target/$TARGET/release/herdr-core
+          arch -x86_64 target/$TARGET/release/herdr-core --version || true
+      - name: Build herdr-app (x86_64)
+        working-directory: app
+        run: |
+          # upstream refuses to package Intel; lift that guard only
+          perl -0pi -e 's/if \[\[ \$os == macos && \$arch != aarch64 \]\]; then\n.*?\n  exit 1\nfi\n//s' scripts/package
+          grep -q "Intel Macs aren't supported" scripts/package && { echo "guard still present"; exit 1; } || true
+          scripts/package $TARGET
+          file target/$TARGET/release/herdr-app
+      - name: Make DMG
+        run: |
+          stage=$(mktemp -d)/Herdr
+          mkdir -p "$stage"
+          tar -xzf app/dist/herdr-app-macos-x86_64.tar.gz -C "$stage"
+          cp -R "core/target/$TARGET/release/Herdr Core.app" "$stage/Herdr Core.app"
+          cp wrap/dmg/install.command "$stage/安装 Herdr (双击).command"
+          chmod +x "$stage/安装 Herdr (双击).command"
+          cp wrap/dmg/README.txt "$stage/README.txt"
+          ln -s /Applications "$stage/Applications"
+          name="Herdr-${{ steps.v.outputs.app }}-core-${{ steps.v.outputs.core }}-intel.dmg"
+          hdiutil create -volname "Herdr Intel" -srcfolder "$stage" -ov -format UDZO "$name"
+          shasum -a 256 "$name" | tee "$name.sha256"
+          echo "DMG=$name" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: herdr-intel-dmg
+          path: |
+            ${{ env.DMG }}
+            ${{ env.DMG }}.sha256
+      - name: Release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        working-directory: wrap
+        run: |
+          tag="app-${{ steps.v.outputs.app }}-core-${{ steps.v.outputs.core }}-$(date -u +%Y%m%d%H%M)"
+          gh release create "$tag" "../$DMG" "../$DMG.sha256" --title "Herdr ${{ steps.v.outputs.app }} + core ${{ steps.v.outputs.core }} (Intel Mac)" --notes "Unofficial Intel (x86_64) build from herdrdev/herdr-app and herdrdev/herdr-core, ad hoc signed. See README.txt inside the DMG."
