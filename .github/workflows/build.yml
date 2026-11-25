@@ -37,7 +37,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ env.TARGET }}
       - uses: mlugg/setup-zig@v2
-        with: { version: ${{ env.ZIG_VERSION }} }
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Versions
         id: v
         run: |
@@ -83,7 +84,8 @@ jobs:
             ${{ env.DMG }}
             ${{ env.DMG }}.sha256
       - name: Release
-        env: { GH_TOKEN: "${{ github.token }}" }
+        env:
+          GH_TOKEN: ${{ github.token }}
         working-directory: wrap
         run: |
           tag="app-${{ steps.v.outputs.app }}-core-${{ steps.v.outputs.core }}-$(date -u +%Y%m%d%H%M)"
